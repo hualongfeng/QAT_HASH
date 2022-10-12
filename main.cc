@@ -54,7 +54,7 @@ static void sal_polling(CpaInstanceHandle cyInstHandle)
   while (gPollingCy)
   {
     icp_sal_CyPollInstance(cyInstHandle, 0);
-    //OS_SLEEP(10);
+    OS_SLEEP(1);
   }
 }
 
@@ -68,7 +68,6 @@ void sampleCyStartPolling(CpaInstanceHandle cyInstHandle)
   if ((status == CPA_STATUS_SUCCESS) && (info2.isPolled == CPA_TRUE))
   {
     /* Start thread to poll instance */
-    // sampleThreadCreate(gPollingThread, sal_polling, cyInstHandle);
     gPollingThread = std::thread(sal_polling, cyInstHandle);
   }
 }
@@ -76,7 +75,6 @@ void sampleCyStartPolling(CpaInstanceHandle cyInstHandle)
 void sampleCyStopPolling(void)
 {
   gPollingCy = 0;
-//  OS_SLEEP(10);
   gPollingThread.join();
 }
 
