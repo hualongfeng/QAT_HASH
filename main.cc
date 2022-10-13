@@ -2,11 +2,30 @@
 #include "crypto.h"
 #include <pthread.h>
 #include <thread>
+#include <string.h>
+#include <vector>
 
 using namespace std;
 
 
-#define MAX_INSTANCES 200
+unsigned char sha256result4M[] = {
+  0x0b, 0xf0, 0xbe, 0xc7,
+  0x58, 0xd8, 0x86, 0x13,
+  0xcc, 0xc6, 0xb4, 0xc7,
+  0xa1, 0xc1, 0x6e, 0x4c,
+  0x87, 0x63, 0xaa, 0x18,
+  0x22, 0x93, 0x33, 0xde,
+  0x87, 0x4c, 0x71, 0x93,
+  0x77, 0xcd, 0xed, 0x64
+};
+
+unsigned char md5result4M[] = {
+  0xd8, 0x35, 0xde, 0x17,
+  0x69, 0xad, 0x8d, 0x1b,
+  0x2d, 0x35, 0xda, 0xf6,
+  0x40, 0x03, 0xcb, 0x04
+};
+
 
 /**
  ********************************************************************************
@@ -44,106 +63,52 @@ static __inline CpaStatus sampleSleep(Cpa32U ms)
 
 #define OS_SLEEP(ms) sampleSleep((ms))
 
-//static pthread_t gPollingThread;
-static std::thread gPollingThread;
-static volatile int gPollingCy = 0;
-
-static void sal_polling(CpaInstanceHandle cyInstHandle)
-{
-  gPollingCy = 1;
-  while (gPollingCy)
-  {
-    icp_sal_CyPollInstance(cyInstHandle, 0);
-    OS_SLEEP(1);
-  }
-}
-
-
-void sampleCyStartPolling(CpaInstanceHandle cyInstHandle)
-{
-  CpaInstanceInfo2 info2;
-  CpaStatus status = CPA_STATUS_SUCCESS;
-
-  status = cpaCyInstanceGetInfo2(cyInstHandle, &info2);
-  if ((status == CPA_STATUS_SUCCESS) && (info2.isPolled == CPA_TRUE))
-  {
-    /* Start thread to poll instance */
-    gPollingThread = std::thread(sal_polling, cyInstHandle);
-  }
-}
-
-void sampleCyStopPolling(void)
-{
-  gPollingCy = 0;
-  gPollingThread.join();
-}
-
+void testSHA256();
+void testMD5();
 
 int main() {
   std::cout << "This is main!!!" << std::endl;
-  CpaStatus stat = CPA_STATUS_SUCCESS;
+  std::cout << "--------------------" << std::endl;
+for (int i = 0; i < 10000; i++) {
+  std::thread first(testSHA256);
+  std::thread second(testSHA256);
+  std::thread three(testMD5);
+  std::thread four(testMD5);
+  std::thread five(testSHA256);
+  std::thread six(testMD5);
+  std::thread seven(testSHA256);
+  std::thread eight(testMD5);
+
+  first.join();
+  second.join();
+  three.join();
+  four.join();
+  five.join();
+  six.join();
+  seven.join();
+  eight.join();
 
 
-  stat = qaeMemInit();
-  if (CPA_STATUS_SUCCESS != stat)
-  {
-     std::cout << "Failed to initialize memory driver" << std::endl;
-     return 0;
-  }
+  std::cout << "--------------------" << std::endl;
+}
 
-  stat = icp_sal_userStartMultiProcess("SHIM", CPA_FALSE);
-  if (CPA_STATUS_SUCCESS != stat)
-  {
-    std::cout << "Failed to start user process SSL" << std::endl;
-    qaeMemDestroy();
-    return 0;
-  }
+vector<std::thread> threads;
+for (int i = 0; i < 400; i++) {
+  threads.push_back(std::thread(testSHA256));
+  threads.push_back(std::thread(testMD5));
+}
 
-  CpaInstanceHandle cyInstHandle = NULL;
+for (auto &t : threads) {
+  t.join();
+}
+  return 0;
+}
 
-  CpaInstanceHandle cyInstHandles[MAX_INSTANCES];
-  Cpa16U numInstances = 0;
-  CpaStatus status = CPA_STATUS_SUCCESS;
-
-  status = cpaCyGetNumInstances(&numInstances);
-  if ((status == CPA_STATUS_SUCCESS) && (numInstances > 0))
-  {
-    status = cpaCyGetInstances(numInstances, cyInstHandles);
-    if (status == CPA_STATUS_SUCCESS)
-      cyInstHandle = cyInstHandles[0];
-  }
-
-  if (0 == numInstances)
-  {
-    std::cout << "No instances found for 'SSL'" << std::endl;
-    std::cout << "Please check your section names" << std::endl;
-    std::cout << " in the config file." << std::endl;
-    std::cout << "Also make sure to use config file version 2." << std::endl;
-  }
-
-  if (cyInstHandle == NULL)
-  {
-    return CPA_STATUS_FAIL;
-  }
-
-  /* Start Cryptographic component */
-  std::cout << "cpaCyStartInstance" << std::endl;
-  status = cpaCyStartInstance(cyInstHandle);
-
-  if (CPA_STATUS_SUCCESS == status)
-  {
-    /*
-     *  Set the address translation function for the instance
-     */
-    status = cpaCySetAddressTranslation(cyInstHandle, qaeVirtToPhysNUMA);
-  }
-
-  sampleCyStartPolling(cyInstHandle);
-//----------------------------------------
-  {
+void testMD5() {
   unsigned char digest[CEPH_CRYPTO_MD5_DIGESTSIZE];
 
-  SHA256 sha256(cyInstHandle);
+  //MD5 md5(cyInstHandle);
+  MD5 md5;
 
 #define BUFFER_SIZE 131072 //(65536 * 2)
   FILE *srcFile = NULL;
@@ -156,7 +121,44 @@ int main() {
   unsigned char data[BUFFER_SIZE];
   size_t len;
 
-  std::cout << "-----------------------------" << std::endl;
+  while (!feof(srcFile)) {
+    len = fread(data, 1, BUFFER_SIZE, srcFile);
+    //len = fread(data, 1, 38688 + 65536, srcFile);
+    //std::cout << "len: " << len << std::endl;
+    md5.Update(data, len);
+  }
+  md5.Final(digest);
+  if (memcmp(md5result4M, digest, sizeof(md5result4M)) == 0) {
+    // do nothing
+  } else {
+    for(int i = 0; i < CEPH_CRYPTO_MD5_DIGESTSIZE; i++) {
+      printf("%02X", digest[i]);
+      printf("%02X", md5result4M[i]);
+    }
+    printf("\n");
+  }
+  fclose(srcFile);
+}
+
+
+
+void testSHA256() {
+  unsigned char digest[CEPH_CRYPTO_SHA256_DIGESTSIZE];
+
+  //SHA256 sha256(cyInstHandle);
+  SHA256 sha256;
+
+#define BUFFER_SIZE 131072 //(65536 * 2)
+  FILE *srcFile = NULL;
+  //srcFile = fopen("digest", "r");
+  srcFile = fopen("4M", "r");
+  //srcFile = fopen("38688", "r");
+  if (srcFile == nullptr) {
+    std::cout << "failed to open file" << std::endl;
+  }
+  unsigned char data[BUFFER_SIZE];
+  size_t len;
+
   while (!feof(srcFile)) {
     len = fread(data, 1, BUFFER_SIZE, srcFile);
     //len = fread(data, 1, 38688 + 65536, srcFile);
@@ -164,23 +166,13 @@ int main() {
     sha256.Update(data, len);
   }
   sha256.Final(digest);
-  for(int i = 0; i < CEPH_CRYPTO_SHA256_DIGESTSIZE; i++) {
-    printf("%02X", digest[i]);
+
+  if (memcmp(sha256result4M, digest, sizeof(sha256result4M)) == 0) {
+  } else {
+    for(int i = 0; i < CEPH_CRYPTO_SHA256_DIGESTSIZE; i++) {
+      printf("%02X", digest[i]);
+    }
+    printf("\n");
   }
-  std::cout << "\n-----------------------------" << std::endl;
   fclose(srcFile);
-
-
-
-
-
-  }
-//----------------------------------------
-  sampleCyStopPolling();
-  cpaCyStopInstance(cyInstHandle);
-  icp_sal_userStop();
-  qaeMemDestroy();
-
-
-  return 0;
 }
