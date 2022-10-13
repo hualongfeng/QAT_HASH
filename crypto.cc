@@ -2,6 +2,10 @@
 #include <iostream>
 #include <semaphore.h>
 #include <string.h>
+#include <vector>
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 extern "C" {
 #include "cpa.h"
@@ -30,6 +34,136 @@ struct completion_struct
 #define COMPLETE(s) sem_post(&((s)->semaphore))
 
 #define COMPLETION_DESTROY(s) sem_destroy(&((s)->semaphore))
+
+static __inline CpaStatus msSleep(Cpa32U ms)
+{
+  int ret = 0;
+  struct timespec resTime, remTime;
+  resTime.tv_sec = ms / 1000;
+  resTime.tv_nsec = (ms % 1000) * 1000000;
+  do {
+    ret = nanosleep(&resTime, &remTime);
+    resTime = remTime;
+  } while ((ret != 0) && (errno == EINTR));
+
+  if (ret != 0) {
+    std::cout << "nanoSleep failed with code "<< ret << std::endl;
+    return CPA_STATUS_FAIL;
+  } else {
+    return CPA_STATUS_SUCCESS;
+  }
+}
+
+class QatInstancesManager {
+  std::vector<CpaInstanceHandle> cyInstances;
+  std::mutex lock;
+  std::atomic<size_t> index{0};
+  std::thread poll_thread;
+  volatile bool gPollingCy{false};
+ public:
+  void poll_instance();
+  QatInstancesManager();
+  ~QatInstancesManager();
+  CpaInstanceHandle getInstance();
+};
+
+QatInstancesManager::QatInstancesManager() : index(0) {
+  CpaStatus stat = CPA_STATUS_SUCCESS;
+  Cpa16U numInstances = 0;
+  std::cout << "QatInstancesManager constructor" << std::endl;
+
+  stat = qaeMemInit();
+  if (CPA_STATUS_SUCCESS != stat)
+  {
+    std::cout << "Failed to initialize memory driver" << std::endl;
+    throw "Failed to initialize memory driver";
+  }
+
+  stat = icp_sal_userStartMultiProcess("SHIM", CPA_FALSE);
+  if (CPA_STATUS_SUCCESS != stat)
+  {
+    std::cout << "Failed to start user process SHIM" << std::endl;
+    qaeMemDestroy();
+    throw "Failed to start user process SHIM";
+  }
+
+  stat = cpaCyGetNumInstances(&numInstances);
+  if ((stat == CPA_STATUS_SUCCESS) && (numInstances > 0)) {
+    cyInstances.resize(numInstances);
+    stat = cpaCyGetInstances(numInstances, &cyInstances[0]);
+  }
+
+  if ((stat != CPA_STATUS_SUCCESS) || (numInstances == 0)) {
+    icp_sal_userStop();
+    qaeMemDestroy();
+
+    std::cout << "No instances found for 'SHIM'" << std::endl;
+    throw "No instances found for 'SHIM'";
+  }
+
+  std::cout << "cpaCyStartInstance: " << numInstances << std::endl;
+  for (auto &instance : cyInstances) {
+    cpaCyStartInstance(instance);
+    cpaCySetAddressTranslation(instance, qaeVirtToPhysNUMA);
+    CpaInstanceInfo2 info2;
+    stat = cpaCyInstanceGetInfo2(instance, &info2);
+    if ((stat == CPA_STATUS_SUCCESS) && (info2.isPolled == CPA_TRUE)) {
+      /*do nothing*/
+    } else {
+      icp_sal_userStop();
+      qaeMemDestroy();
+
+      std::cout << "One instance cannot poll, check the config" << std::endl;
+      throw "One instance cannot poll, check the config";
+    }
+  }
+  std::cout << "start poll instance" << std::endl;
+  poll_thread = std::thread(&QatInstancesManager::poll_instance, this);
+}
+
+QatInstancesManager::~QatInstancesManager() {
+  std::cout << "QatInstancesManager destructor" << std::endl;
+  gPollingCy = false;
+  poll_thread.join();
+  for (auto &instance : cyInstances) {
+    cpaCyStopInstance(instance);
+  }
+  icp_sal_userStop();
+  qaeMemDestroy();
+}
+
+CpaInstanceHandle QatInstancesManager::getInstance() {
+  std::lock_guard<std::mutex> l{lock};
+  CpaInstanceHandle instance = cyInstances[index++];
+  if (index > cyInstances.size()) index = 0;
+  return instance;
+}
+
+void QatInstancesManager::poll_instance() {
+  gPollingCy = true;
+  while (gPollingCy) {
+    Cpa64U requestsCount = 0;
+    int cnt = 0;
+    for (auto &instance : cyInstances) {
+      CpaCySymStats64 stat{0};
+      cpaCySymQueryStats64(instance, &stat);
+      std::cout << "numSymOpRequests = " << stat.numSymOpRequests
+                << ", numSymOpCompleted = " << stat.numSymOpCompleted
+                << ", numSessionsInitialized = " << stat.numSessionsInitialized
+                << ", numSessionsRemoved = " << stat.numSessionsRemoved
+		<< ", num = " << cnt++
+                << std::endl;
+
+      requestsCount += (stat.numSymOpRequests - stat.numSymOpCompleted);
+      if (stat.numSymOpRequests != stat.numSymOpCompleted) {
+        icp_sal_CyPollInstance(instance, 0);
+      }
+    }
+    if (requestsCount == 0) {
+      msSleep(1);
+    }
+  }
+}
 
 static inline void qcc_contig_mem_free(void **ptr) {
   if (*ptr) {
@@ -91,12 +225,13 @@ static Cpa32U block_size(CpaCySymHashAlgorithm _type) {
   return -1;
 }
 
-QatHashCommon::QatHashCommon(const CpaInstanceHandle _instHandle, const CpaCySymHashAlgorithm _type)
-	: cyInstHandle(_instHandle), mpType(_type) {
+static QatInstancesManager qat_instance_manager;
+
+QatHashCommon::QatHashCommon(const CpaCySymHashAlgorithm _type)
+	: cyInstHandle(qat_instance_manager.getInstance()), mpType(_type) {
   CpaStatus status = CPA_STATUS_SUCCESS;
   digest_length = digest_size(mpType);
   block_length = block_size(mpType);
-  //status = cpaCySetAddressTranslation(cyInstHandle, qaeVirtToPhysNUMA);
   memset(&sessionSetupData, 0, sizeof(sessionSetupData));
   sessionSetupData.sessionPriority = CPA_CY_PRIORITY_NORMAL;
   sessionSetupData.symOperation = CPA_CY_SYM_OP_HASH;
@@ -105,8 +240,6 @@ QatHashCommon::QatHashCommon(const CpaInstanceHandle _instHandle, const CpaCySym
   sessionSetupData.hashSetupData.digestResultLenInBytes = digest_length;
   sessionSetupData.digestIsAppended = CPA_FALSE;
   sessionSetupData.verifyDigest = CPA_FALSE;
-
-//  this->Restart();
 }
 
 QatHashCommon::~QatHashCommon() {
@@ -125,6 +258,11 @@ QatHashCommon::~QatHashCommon() {
   }
  
   if (sessionCtx != nullptr) {
+    CpaBoolean sessionInUse = CPA_FALSE;
+    do {
+      cpaCySymSessionInUse(sessionCtx, &sessionInUse);
+    } while (sessionInUse);
+
     cpaCySymRemoveSession(cyInstHandle, sessionCtx);
     qcc_contig_mem_free((void**)&sessionCtx);
   }
@@ -137,16 +275,19 @@ void QatHashCommon::Restart() {
     // first need to alloc session memory
     status = cpaCySymSessionCtxGetSize(cyInstHandle, &sessionSetupData, &sessionCtxSize);
     if (status != CPA_STATUS_SUCCESS) {
+      std::cout <<  "cpaCySymSessionCtxGetSize failed, stat = " << status << std::endl;
       throw "cpaCySymSessionCtxGetSize failed";
     }
     status = qcc_contig_mem_alloc((void**)&sessionCtx, sessionCtxSize);
     if (status != CPA_STATUS_SUCCESS) {
+      std::cout << "Failed to alloc contiguous memory for SessionCtx, stat = " << status << std::endl;
       throw "Failed to alloc contiguous memory for SessionCtx";
     }
   }
 
   status = cpaCySymInitSession(cyInstHandle, symCallback, &sessionSetupData, sessionCtx);
   if (status != CPA_STATUS_SUCCESS) {
+    std::cout << "cpaCySymInitSession failed, stat = " << status << std::endl;;
     throw "cpaCySymInitSession failed";
   }
 }
@@ -181,7 +322,6 @@ CpaBufferList* QatHashCommon::getCpaBufferList() {
   if (CPA_STATUS_SUCCESS == status)
   {
     status = qcc_contig_mem_alloc((void**)&pBufferMeta, bufferMetaSize);
-    //status = PHYS_CONTIG_ALLOC(&pBufferMeta, bufferMetaSize);
   }
 
   if (CPA_STATUS_SUCCESS == status)
@@ -266,25 +406,23 @@ void QatHashCommon::Update(const unsigned char *input, size_t length) {
 
     input += new_write_length;
 
-    //std::cout << "left_length: " << left_length << ", current_length: " << current_length << std::endl;
-    //std::cout << "align_left_len: " << align_left_len << std::endl;
-
-
     pBufferList->pBuffers->dataLenInBytes = current_length;
     pOpData.packetType = CPA_CY_SYM_PACKET_TYPE_PARTIAL;
     pOpData.sessionCtx = sessionCtx;
     pOpData.hashStartSrcOffsetInBytes = 0;
     pOpData.messageLenToHashInBytes = current_length;
     pOpData.pDigestResult = (Cpa8U *)pBufferList->pUserData;
-    status = cpaCySymPerformOp(
+    do {
+      status = cpaCySymPerformOp(
         cyInstHandle,
         (void *)&complete,
         &pOpData,
         pBufferList,
         pBufferList,
         NULL);
+    } while (status == CPA_STATUS_RETRY);
     if (CPA_STATUS_SUCCESS != status) {
-      std::cout << "cpaCySymPerformOp failed. (status = " << status << std::endl;
+      std::cout << "Update cpaCySymPerformOp failed. (status = " << status << std::endl;
     }
    
     if (CPA_STATUS_SUCCESS == status) {
@@ -317,7 +455,8 @@ void QatHashCommon::Final(unsigned char *digest) {
   pOpData.messageLenToHashInBytes = pBufferList->pBuffers->dataLenInBytes;
   pOpData.pDigestResult = (Cpa8U *)pBufferList->pUserData;
 
-  status = cpaCySymPerformOp(
+  do {
+    status = cpaCySymPerformOp(
       cyInstHandle,
       (void *)&complete,
       &pOpData,
@@ -325,8 +464,9 @@ void QatHashCommon::Final(unsigned char *digest) {
       pBufferList,
       NULL);
 
+  } while (status == CPA_STATUS_RETRY);
   if (CPA_STATUS_SUCCESS != status) {
-    std::cout << "cpaCySymPerformOp failed. (status = " << status << std::endl;
+    std::cout << "Final cpaCySymPerformOp failed. (status = " << status << std::endl;
   }
  
   if (CPA_STATUS_SUCCESS == status) {

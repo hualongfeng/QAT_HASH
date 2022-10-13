@@ -4,11 +4,6 @@
 extern "C" {
 #include "cpa.h"
 #include "lac/cpa_cy_sym.h"
-#include "lac/cpa_cy_im.h"
-#include "qae_mem.h"
-#include "icp_sal_user.h"
-#include "icp_sal_poll.h"
-#include "qae_mem_utils.h"
 }
 
 
@@ -40,7 +35,6 @@ typedef enum _CpaCySymHashAlgorithm
 } CpaCySymHashAlgorithm;
 */
 
-
 class QatHashCommon {
  private:
   CpaInstanceHandle cyInstHandle{nullptr};
@@ -56,7 +50,7 @@ class QatHashCommon {
  protected:
   CpaCySymSessionSetupData sessionSetupData;
  public:
-  QatHashCommon (const CpaInstanceHandle cyInstHandle, const CpaCySymHashAlgorithm mpType);
+  QatHashCommon (const CpaCySymHashAlgorithm mpType);
   ~QatHashCommon ();
   void Restart();
   void SetFlags(int flags){}
@@ -67,8 +61,8 @@ class QatHashCommon {
 
 class QatDigest : public QatHashCommon {
  public:
-  QatDigest (const CpaInstanceHandle cyInstHandle, const CpaCySymHashAlgorithm mpType) :
-	  QatHashCommon(cyInstHandle, mpType) {
+  QatDigest (const CpaCySymHashAlgorithm mpType) :
+	  QatHashCommon(mpType) {
     this->Restart();
   }
 };
@@ -76,34 +70,34 @@ class QatDigest : public QatHashCommon {
 class MD5 : public QatDigest {
  public:
   static constexpr size_t digest_size = CEPH_CRYPTO_MD5_DIGESTSIZE;
-  MD5(const CpaInstanceHandle cyInstHandle) : QatDigest(cyInstHandle, CPA_CY_SYM_HASH_MD5) {}
+  MD5() : QatDigest(CPA_CY_SYM_HASH_MD5) {}
 };
 
 class SHA1 : public QatDigest {
  public:
   static constexpr size_t digest_size = CEPH_CRYPTO_SHA1_DIGESTSIZE;
-  SHA1(const CpaInstanceHandle cyInstHandle) : QatDigest(cyInstHandle, CPA_CY_SYM_HASH_SHA1) {}
+  SHA1() : QatDigest(CPA_CY_SYM_HASH_SHA1) {}
 };
 
 class SHA256 : public QatDigest {
  public:
   static constexpr size_t digest_size = CEPH_CRYPTO_SHA256_DIGESTSIZE;
-  SHA256(const CpaInstanceHandle cyInstHandle) : QatDigest(cyInstHandle, CPA_CY_SYM_HASH_SHA256) {}
+  SHA256() : QatDigest(CPA_CY_SYM_HASH_SHA256) {}
 };
 
 class SHA512 : public QatDigest {
  public:
   static constexpr size_t digest_size = CEPH_CRYPTO_SHA512_DIGESTSIZE;
-  SHA512(const CpaInstanceHandle cyInstHandle) : QatDigest(cyInstHandle, CPA_CY_SYM_HASH_SHA512) {}
+  SHA512() : QatDigest(CPA_CY_SYM_HASH_SHA512) {}
 };
 
 
 
 class QatHMAC : public QatHashCommon {
  public:
-  QatHMAC (const CpaInstanceHandle cyInstHandle, const CpaCySymHashAlgorithm mpType,
+  QatHMAC (const CpaCySymHashAlgorithm mpType,
 	   const unsigned char *key, size_t length) :
-	  QatHashCommon(cyInstHandle, mpType) {
+	  QatHashCommon(mpType) {
     sessionSetupData.hashSetupData.hashMode = CPA_CY_SYM_HASH_MODE_AUTH;
     sessionSetupData.hashSetupData.authModeSetupData.authKey = const_cast<Cpa8U*>(key);
     sessionSetupData.hashSetupData.authModeSetupData.authKeyLenInBytes = length;
@@ -114,19 +108,16 @@ class QatHMAC : public QatHashCommon {
 class HMACSHA1 : public QatHMAC {
  public:
   static constexpr size_t digest_size = CEPH_CRYPTO_HMACSHA1_DIGESTSIZE;
-  HMACSHA1(const CpaInstanceHandle cyInstHandle,
-	   const unsigned char *key, size_t length) :
-	  QatHMAC(cyInstHandle, CPA_CY_SYM_HASH_SHA1, key, length){}
+  HMACSHA1(const unsigned char *key, size_t length) :
+	  QatHMAC(CPA_CY_SYM_HASH_SHA1, key, length){}
 };
 
 class HMACSHA256 : public QatHMAC {
  public:
   static constexpr size_t digest_size = CEPH_CRYPTO_HMACSHA256_DIGESTSIZE;
-  HMACSHA256(const CpaInstanceHandle cyInstHandle,
-	   const unsigned char *key, size_t length) :
-	  QatHMAC(cyInstHandle, CPA_CY_SYM_HASH_SHA256, key, length){}
+  HMACSHA256(const unsigned char *key, size_t length) :
+	  QatHMAC(CPA_CY_SYM_HASH_SHA256, key, length){}
 };
-
 
 
 #endif //CRYPTO_H
